@@ -15,9 +15,18 @@ spec:
     spec:
       containers:
         - name: backend
-          image: your-docker-registry/backend:latest
+          image: ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
+          imagePullPolicy: Always
           env:
-            - name: MYSQL_ROOT_PASSWORD
-              value: "rootpassword"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: DJANGO_SETTINGS_MODULE
+              value: "meraki.settings"
+            - name: ALLOWED_HOSTS
+              value: "*"
+            - name: DEBUG
+              value: "True"
           ports:
-            - containerPort: 3306
+            - containerPort: 8000
