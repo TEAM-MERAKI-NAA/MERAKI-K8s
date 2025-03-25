@@ -4,7 +4,7 @@ metadata:
   name: frontend-deployment
   namespace: frontend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: frontend
@@ -15,6 +15,22 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: your-docker-registry/frontend:latest
+          image: ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
+          imagePullPolicy: Always
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3000"
+            - name: WDS_SOCKET_PORT
+              value: "0"
           ports:
             - containerPort: 3000
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 3
