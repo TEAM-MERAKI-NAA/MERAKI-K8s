@@ -179,13 +179,13 @@ jobs:
         sleep 60  # Increased wait time
         
         echo "Checking frontend health..."
-        curl -f http://${{ secrets.AZURE_VM_HOST }}:30001 || {
+        curl -f http://${{ secrets.AZURE_VM_HOST }}:80 || {
           echo "Frontend health check failed!"
           exit 1
         }
         
         echo "Checking backend health..."
-        curl -f http://${{ secrets.AZURE_VM_HOST }}:30000 || {
+        curl -f http://${{ secrets.AZURE_VM_HOST }}:8000 || {
           echo "Backend health check failed!"
           exit 1
         }
