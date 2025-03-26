@@ -59,11 +59,30 @@ jobs:
           - role: worker
           EOF
           
+          # Create Namespace.yml
+          cat > manifestfiles/Namespace.yml << "EOF"
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: frontend
+          ---
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: backend
+          EOF
+          
+          # Delete existing cluster if it exists
+          kind delete cluster || true
+          
           # Create kind cluster
           kind create cluster --config manifestfiles/kind-cluster.yml
           
           # Wait for cluster to be ready
           kubectl wait --for=condition=ready node --all --timeout=300s
+          
+          # Verify cluster is running
+          kubectl cluster-info
         '
 
     - name: Create Namespaces and ACR Secret
@@ -71,8 +90,12 @@ jobs:
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           echo "Creating namespaces and ACR secret..."
           
-          # Create namespaces
-          kubectl apply -f manifestfiles/Namespace.yml
+          # Create namespaces first
+          kubectl apply -f ~/manifestfiles/Namespace.yml
+          
+          # Wait for namespaces to be active
+          kubectl wait --for=condition=Active namespace/frontend --timeout=60s
+          kubectl wait --for=condition=Active namespace/backend --timeout=60s
           
           # Create ACR secret in frontend namespace
           kubectl create secret docker-registry acr-secret \
@@ -80,7 +103,7 @@ jobs:
             --docker-username=${{ secrets.ACR_USERNAME }} \
             --docker-password=${{ secrets.ACR_PASSWORD }} \
             --namespace=frontend \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml | kubectl apply -f - -n frontend
           
           # Create ACR secret in backend namespace
           kubectl create secret docker-registry acr-secret \
@@ -88,7 +111,7 @@ jobs:
             --docker-username=${{ secrets.ACR_USERNAME }} \
             --docker-password=${{ secrets.ACR_PASSWORD }} \
             --namespace=backend \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml | kubectl apply -f - -n backend
         '
 
     - name: Deploy Frontend
@@ -98,46 +121,27 @@ jobs:
           
           # Clone frontend repository
           rm -rf ~/MERAKI-FE
-          git clone -b development https://github.com/TEAM-MERAKI-NAA/MERAKI-FE.git
-          
-          echo "Moving to repository directory..."
+          git clone -b development https://github.com/TEAM-MERAKI-NAA/MERAKI-FE.git ~/MERAKI-FE
           cd ~/MERAKI-FE
           
-          # Check if Dockerfile exists
-          if [ ! -f "Dockerfile" ]; then
-            echo "ERROR: Dockerfile not found in current directory"
-            echo "Contents of directory:"
-            ls -la
-            exit 1
-          fi
-          
-          echo "Dockerfile found, proceeding with build..."
-          
           # Login to ACR
-          echo "Logging in to ACR..."
           echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_LOGIN_SERVER }} -u ${{ secrets.ACR_USERNAME }} --password-stdin
           
-          # Build and tag image
-          echo "Building Docker image..."
+          # Build and push frontend image
           docker build -t immihub-fe .
-          
-          echo "Tagging Docker image..."
           docker tag immihub-fe ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
-          
-          # Push to ACR
-          echo "Pushing to ACR..."
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
           
-          # Apply Kubernetes manifests for frontend
-          echo "Applying frontend Kubernetes manifests..."
-          kubectl apply -f manifestfiles/frontend-deployment.yml -n frontend
-          kubectl apply -f manifestfiles/frontend-service.yml -n frontend
+          # Apply Kubernetes manifests for frontend in frontend namespace
+          kubectl apply -f ~/manifestfiles/frontend-deployment.yml -n frontend
+          kubectl apply -f ~/manifestfiles/frontend-service.yml -n frontend
           
           # Wait for frontend deployment to be ready
-          echo "Waiting for frontend deployment to be ready..."
-          kubectl wait --for=condition=available deployment/frontend-deployment -n frontend --timeout=300s
+          kubectl -n frontend wait --for=condition=available deployment/frontend-deployment --timeout=300s
           
-          echo "Frontend deployment completed!"
+          # Verify frontend deployment
+          echo "Frontend deployment status:"
+          kubectl get all -n frontend
         '
 
     - name: Deploy Backend
@@ -148,54 +152,41 @@ jobs:
           # Clone backend repository
           rm -rf ~/MERAKI-BE
           git clone -b swagat-newbase https://github.com/TEAM-MERAKI-NAA/MERAKI-BE.git ~/MERAKI-BE
-          
-          echo "Moving to repository directory..."
           cd ~/MERAKI-BE
           
-          # Try to find Dockerfile recursively
-          DOCKERFILE_PATH=$(find . -name "Dockerfile" | head -1)
-          
-          if [ -z "$DOCKERFILE_PATH" ]; then
-            echo "ERROR: Dockerfile not found in repository"
-            echo "Contents of root directory:"
-            ls -la
-            exit 1
-          fi
-          
-          # Extract directory path from file path
-          DOCKER_DIR=$(dirname "$DOCKERFILE_PATH")
-          echo "Dockerfile found at: $DOCKERFILE_PATH"
-          echo "Moving to directory: $DOCKER_DIR"
-          cd "$DOCKER_DIR"
-          
-          echo "Current directory contents:" 
-          ls -la
-          
           # Login to ACR
-          echo "Logging in to ACR..."
           echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_LOGIN_SERVER }} -u ${{ secrets.ACR_USERNAME }} --password-stdin
           
-          # Build and tag image
-          echo "Building Docker image..."
+          # Build and push backend image
           docker build -t immihub-be .
-          
-          echo "Tagging Docker image..."
           docker tag immihub-be ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
-          
-          # Push to ACR
-          echo "Pushing to ACR..."
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
           
-          # Apply Kubernetes manifests for backend
-          echo "Applying backend Kubernetes manifests..."
-          kubectl apply -f manifestfiles/backend-deployment.yml -n backend
-          kubectl apply -f manifestfiles/backend-service.yml -n backend
+          # Apply Kubernetes manifests for backend in backend namespace
+          kubectl apply -f ~/manifestfiles/backend-deployment.yml -n backend
+          kubectl apply -f ~/manifestfiles/backend-service.yml -n backend
           
           # Wait for backend deployment to be ready
-          echo "Waiting for backend deployment to be ready..."
-          kubectl wait --for=condition=available deployment/backend-deployment -n backend --timeout=300s
+          kubectl -n backend wait --for=condition=available deployment/backend-deployment --timeout=300s
           
-          echo "Backend deployment completed!"
+          # Verify backend deployment
+          echo "Backend deployment status:"
+          kubectl get all -n backend
+        '
+
+    - name: Verify Deployments
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Verifying deployments in each namespace..."
+          
+          echo "Frontend namespace resources:"
+          kubectl get all -n frontend
+          
+          echo "Backend namespace resources:"
+          kubectl get all -n backend
+          
+          echo "Services in all namespaces:"
+          kubectl get services --all-namespaces
         '
 
     - name: Health Check
