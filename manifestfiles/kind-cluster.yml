@@ -8,4 +8,4 @@ nodes:
   - containerPort: 443
     hostPort: 8443
 - role: worker
-- role: workerS
+- role: worker
