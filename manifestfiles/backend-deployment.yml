@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
+          image: immihubacr.azurecr.io/immihub-be:latest
           imagePullPolicy: Always
           env:
             - name: PYTHONDONTWRITEBYTECODE
