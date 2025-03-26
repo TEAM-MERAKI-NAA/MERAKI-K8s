@@ -1,8 +1,8 @@
-name: Deploy the the MERAKI Application with K8s
+name: Deploy the MERAKI Application 
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ latest-branch--updates ]
 
 env:
   AZURE_VM_HOST: ${{ secrets.AZURE_VM_HOST }}
@@ -24,12 +24,58 @@ jobs:
         mkdir -p ~/.ssh
         echo "${{ secrets.AZURE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} >> ~/.ssh/known_hosts
+        echo "${{ secrets.AZURE_VM_HOST }} $(ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} 2>/dev/null || echo '')" >> ~/.ssh/known_hosts
+
+    - name: Install Kubernetes Tools
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Installing Kubernetes tools..."
+          
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          # Install kind
+          [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          
+          # Create kind cluster
+          kind create cluster --config manifestfiles/kind-cluster.yml
+          
+          # Wait for cluster to be ready
+          kubectl wait --for=condition=ready node --all --timeout=300s
+        '
+
+    - name: Create Namespaces and ACR Secret
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Creating namespaces and ACR secret..."
+          
+          # Create namespaces
+          kubectl apply -f manifestfiles/Namespace.yml
+          
+          # Create ACR secret in frontend namespace
+          kubectl create secret docker-registry acr-secret \
+            --docker-server=${{ secrets.ACR_LOGIN_SERVER }} \
+            --docker-username=${{ secrets.ACR_USERNAME }} \
+            --docker-password=${{ secrets.ACR_PASSWORD }} \
+            --namespace=frontend \
+            --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Create ACR secret in backend namespace
+          kubectl create secret docker-registry acr-secret \
+            --docker-server=${{ secrets.ACR_LOGIN_SERVER }} \
+            --docker-username=${{ secrets.ACR_USERNAME }} \
+            --docker-password=${{ secrets.ACR_PASSWORD }} \
+            --namespace=backend \
+            --dry-run=client -o yaml | kubectl apply -f -
+        '
 
     - name: Deploy Frontend
       run: |
-        # SSH into VM and deploy frontend
-        ssh ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           echo "Starting frontend deployment..."
           
           # Clone frontend repository
@@ -64,19 +110,21 @@ jobs:
           echo "Pushing to ACR..."
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
           
-          # Apply Kubernetes manifests
-          echo "Applying Kubernetes manifests..."
-          kubectl apply -f manifestfiles/Namespace.yml
-          kubectl apply -f manifestfiles/frontend-deployment.yml
-          kubectl apply -f manifestfiles/frontend-service.yml
+          # Apply Kubernetes manifests for frontend
+          echo "Applying frontend Kubernetes manifests..."
+          kubectl apply -f manifestfiles/frontend-deployment.yml -n frontend
+          kubectl apply -f manifestfiles/frontend-service.yml -n frontend
+          
+          # Wait for frontend deployment to be ready
+          echo "Waiting for frontend deployment to be ready..."
+          kubectl wait --for=condition=available deployment/frontend-deployment -n frontend --timeout=300s
           
           echo "Frontend deployment completed!"
         '
 
     - name: Deploy Backend
       run: |
-        # SSH into VM and deploy backend
-        ssh ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           echo "Starting backend deployment..."
           
           # Clone backend repository
@@ -120,10 +168,14 @@ jobs:
           echo "Pushing to ACR..."
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
           
-          # Apply Kubernetes manifests
-          echo "Applying Kubernetes manifests..."
-          kubectl apply -f manifestfiles/backend-deployment.yml
-          kubectl apply -f manifestfiles/backend-service.yml
+          # Apply Kubernetes manifests for backend
+          echo "Applying backend Kubernetes manifests..."
+          kubectl apply -f manifestfiles/backend-deployment.yml -n backend
+          kubectl apply -f manifestfiles/backend-service.yml -n backend
+          
+          # Wait for backend deployment to be ready
+          echo "Waiting for backend deployment to be ready..."
+          kubectl wait --for=condition=available deployment/backend-deployment -n backend --timeout=300s
           
           echo "Backend deployment completed!"
         '
@@ -131,7 +183,7 @@ jobs:
     - name: Health Check
       run: |
         echo "Waiting for services to start..."
-        sleep 30
+        sleep 60  # Increased wait time
         
         echo "Checking frontend health..."
         curl -f http://${{ secrets.AZURE_VM_HOST }}:3000 || {
