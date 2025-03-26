@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
+          image: immihubacr.azurecr.io/immihub-fe:latest
           imagePullPolicy: Always
           env:
             - name: HOST
