@@ -1,0 +1,153 @@
+name: Deploy the MERAKI Application 
+
+on:
+  push:
+    branches: [ dev ]
+
+env:
+  AZURE_VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+  AZURE_VM_USERNAME: ${{ secrets.AZURE_VM_USERNAME }}
+  AZURE_SSH_PRIVATE_KEY: ${{ secrets.AZURE_SSH_PRIVATE_KEY }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+  ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.AZURE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Deploy Frontend
+      run: |
+        # SSH into VM and deploy frontend
+        ssh ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Starting frontend deployment..."
+          
+          # Clone frontend repository
+          rm -rf ~/MERAKI-FE
+          git clone -b development https://github.com/TEAM-MERAKI-NAA/MERAKI-FE.git
+          
+          echo "Moving to repository directory..."
+          cd ~/MERAKI-FE
+          
+          # Check if Dockerfile exists
+          if [ ! -f "Dockerfile" ]; then
+            echo "ERROR: Dockerfile not found in current directory"
+            echo "Contents of directory:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Dockerfile found, proceeding with build..."
+          
+          # Login to ACR
+          echo "Logging in to ACR..."
+          echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_LOGIN_SERVER }} -u ${{ secrets.ACR_USERNAME }} --password-stdin
+          
+          # Build and tag image
+          echo "Building Docker image..."
+          docker build -t immihub-fe .
+          
+          echo "Tagging Docker image..."
+          docker tag immihub-fe ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
+          
+          # Push to ACR
+          echo "Pushing to ACR..."
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
+          
+          # Apply Kubernetes manifests
+          echo "Applying Kubernetes manifests..."
+          kubectl apply -f manifestfiles/Namespace.yml
+          kubectl apply -f manifestfiles/frontend-deployment.yml
+          kubectl apply -f manifestfiles/frontend-service.yml
+          
+          echo "Frontend deployment completed!"
+        '
+
+    - name: Deploy Backend
+      run: |
+        # SSH into VM and deploy backend
+        ssh ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Starting backend deployment..."
+          
+          # Clone backend repository
+          rm -rf ~/MERAKI-BE
+          git clone -b swagat-newbase https://github.com/TEAM-MERAKI-NAA/MERAKI-BE.git ~/MERAKI-BE
+          
+          echo "Moving to repository directory..."
+          cd ~/MERAKI-BE
+          
+          # Try to find Dockerfile recursively
+          DOCKERFILE_PATH=$(find . -name "Dockerfile" | head -1)
+          
+          if [ -z "$DOCKERFILE_PATH" ]; then
+            echo "ERROR: Dockerfile not found in repository"
+            echo "Contents of root directory:"
+            ls -la
+            exit 1
+          fi
+          
+          # Extract directory path from file path
+          DOCKER_DIR=$(dirname "$DOCKERFILE_PATH")
+          echo "Dockerfile found at: $DOCKERFILE_PATH"
+          echo "Moving to directory: $DOCKER_DIR"
+          cd "$DOCKER_DIR"
+          
+          echo "Current directory contents:" 
+          ls -la
+          
+          # Login to ACR
+          echo "Logging in to ACR..."
+          echo "${{ secrets.ACR_PASSWORD }}" | docker login ${{ secrets.ACR_LOGIN_SERVER }} -u ${{ secrets.ACR_USERNAME }} --password-stdin
+          
+          # Build and tag image
+          echo "Building Docker image..."
+          docker build -t immihub-be .
+          
+          echo "Tagging Docker image..."
+          docker tag immihub-be ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
+          
+          # Push to ACR
+          echo "Pushing to ACR..."
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
+          
+          # Apply Kubernetes manifests
+          echo "Applying Kubernetes manifests..."
+          kubectl apply -f manifestfiles/backend-deployment.yml
+          kubectl apply -f manifestfiles/backend-service.yml
+          
+          echo "Backend deployment completed!"
+        '
+
+    - name: Health Check
+      run: |
+        echo "Waiting for services to start..."
+        sleep 30
+        
+        echo "Checking frontend health..."
+        curl -f http://${{ secrets.AZURE_VM_HOST }}:3000 || {
+          echo "Frontend health check failed!"
+          exit 1
+        }
+        
+        echo "Checking backend health..."
+        curl -f http://${{ secrets.AZURE_VM_HOST }}:8000 || {
+          echo "Backend health check failed!"
+          exit 1
+        }
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "Cleaning up SSH keys..."
+        rm -f ~/.ssh/id_rsa
+        echo "Deployment workflow completed."
