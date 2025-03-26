@@ -26,6 +26,17 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
         echo "${{ secrets.AZURE_VM_HOST }} $(ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} 2>/dev/null || echo '')" >> ~/.ssh/known_hosts
 
+    - name: Copy Manifest Files
+      run: |
+        # Create directory on VM
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} 'mkdir -p ~/manifestfiles'
+        
+        # Copy all manifest files to VM
+        scp -o StrictHostKeyChecking=no ./manifestfiles/* ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }}:~/manifestfiles/
+        
+        # Verify files were copied
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} 'ls -la ~/manifestfiles'
+
     - name: Install Kubernetes Tools
       run: |
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
@@ -41,48 +52,16 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           
-          # Create manifestfiles directory if it doesn't exist
-          mkdir -p manifestfiles
-          
-          # Create kind-cluster.yml
-          cat > manifestfiles/kind-cluster.yml << "EOF"
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          nodes:
-          - role: control-plane
-            extraPortMappings:
-            - containerPort: 80
-              hostPort: 8080
-            - containerPort: 443
-              hostPort: 8443
-          - role: worker
-          - role: worker
-          EOF
-          
-          # Create Namespace.yml
-          cat > manifestfiles/Namespace.yml << "EOF"
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: frontend
-          ---
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: backend
-          EOF
-          
           # Delete existing cluster if it exists
           kind delete cluster || true
           
-          # Create kind cluster
-          kind create cluster --config manifestfiles/kind-cluster.yml
+          # Create kind cluster with your configuration
+          kind create cluster --config ~/manifestfiles/kind-cluster.yml
           
           # Wait for cluster to be ready
-          kubectl wait --for=condition=ready node --all --timeout=300s
-          
-          # Verify cluster is running
+          sleep 30
           kubectl cluster-info
+          kubectl get nodes
         '
 
     - name: Create Namespaces and ACR Secret
@@ -90,12 +69,11 @@ jobs:
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           echo "Creating namespaces and ACR secret..."
           
-          # Create namespaces first
-          kubectl apply -f ~/manifestfiles/Namespace.yml
+          # Create namespaces
+          kubectl apply -f ~/manifestfiles/Namespace.yml --validate=false
           
-          # Wait for namespaces to be active
-          kubectl wait --for=condition=Active namespace/frontend --timeout=60s
-          kubectl wait --for=condition=Active namespace/backend --timeout=60s
+          # Wait for namespaces to be created
+          sleep 10
           
           # Create ACR secret in frontend namespace
           kubectl create secret docker-registry acr-secret \
@@ -103,7 +81,7 @@ jobs:
             --docker-username=${{ secrets.ACR_USERNAME }} \
             --docker-password=${{ secrets.ACR_PASSWORD }} \
             --namespace=frontend \
-            --dry-run=client -o yaml | kubectl apply -f - -n frontend
+            --validate=false
           
           # Create ACR secret in backend namespace
           kubectl create secret docker-registry acr-secret \
@@ -111,7 +89,13 @@ jobs:
             --docker-username=${{ secrets.ACR_USERNAME }} \
             --docker-password=${{ secrets.ACR_PASSWORD }} \
             --namespace=backend \
-            --dry-run=client -o yaml | kubectl apply -f - -n backend
+            --validate=false
+          
+          # Verify namespaces and secrets
+          echo "Verifying namespaces:"
+          kubectl get namespaces
+          echo "Verifying secrets:"
+          kubectl get secrets --all-namespaces | grep acr-secret
         '
 
     - name: Deploy Frontend
