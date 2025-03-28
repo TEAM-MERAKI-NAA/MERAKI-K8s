@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: frontend-service
   namespace: frontend
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /health
 spec:
   selector:
     app: frontend
@@ -12,3 +14,7 @@ spec:
       targetPort: 3000
       nodePort: 30000
   type: NodePort
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
