@@ -206,47 +206,41 @@ jobs:
         echo "Waiting for services to start..."
         sleep 60  # Increased wait time
         
-        # Start port forwarding in background
+        # Run health checks directly on the VM
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          echo "Starting health checks on VM..."
+          
           # Kill any existing port-forward processes
           pkill -f "kubectl port-forward"
           
-          # Start new port forwarding
+          # Start port forwarding in background
           kubectl port-forward -n frontend service/frontend-service 3000:3000 &
           kubectl port-forward -n backend service/backend-service 8000:8000 &
           
           # Wait for port forwarding to be ready
           sleep 5
           
-          # Verify port forwarding is working
-          echo "Verifying port forwarding..."
-          curl -s http://localhost:3000 || echo "Frontend port forwarding failed"
-          curl -s http://localhost:8000 || echo "Backend port forwarding failed"
-        ' &
-        
-        # Store the SSH process ID
-        SSH_PID=$!
-        
-        # Wait for port forwarding to be ready
-        sleep 10
-        
-        # Test the connection
-        echo "Testing connection to frontend..."
-        curl -v http://localhost:3000 || {
-          echo "Frontend connection failed!"
-          kill $SSH_PID
-          exit 1
-        }
-        
-        echo "Testing connection to backend..."
-        curl -v http://localhost:8000 || {
-          echo "Backend connection failed!"
-          kill $SSH_PID
-          exit 1
-        }
-        
-        # Clean up the SSH process
-        kill $SSH_PID
+          # Test frontend
+          echo "Testing frontend..."
+          if curl -s http://localhost:3000 > /dev/null; then
+            echo "Frontend is healthy"
+          else
+            echo "Frontend health check failed"
+            exit 1
+          fi
+          
+          # Test backend
+          echo "Testing backend..."
+          if curl -s http://localhost:8000 > /dev/null; then
+            echo "Backend is healthy"
+          else
+            echo "Backend health check failed"
+            exit 1
+          fi
+          
+          # Clean up port forwarding
+          pkill -f "kubectl port-forward"
+        '
 
     - name: Cleanup
       if: always()
