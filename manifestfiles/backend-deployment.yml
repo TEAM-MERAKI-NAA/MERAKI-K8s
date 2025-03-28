@@ -13,6 +13,8 @@ spec:
       labels:
         app: backend
     spec:
+      imagePullSecrets:
+        - name: acr-secret
       containers:
         - name: backend
           image: immihubacr.azurecr.io/immihub-be:latest
