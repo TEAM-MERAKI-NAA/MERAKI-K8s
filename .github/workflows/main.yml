@@ -195,17 +195,35 @@ jobs:
         echo "Waiting for services to start..."
         sleep 60  # Increased wait time
         
+        # Start port forwarding in background and keep it running
+        ssh -o StrictHostKeyChecking=no -L 3000:localhost:3000 -L 8000:localhost:8000 ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          kubectl port-forward -n frontend service/frontend-service 3000:3000 &
+          kubectl port-forward -n backend service/backend-service 8000:8000 &
+          sleep infinity
+        ' &
+        
+        # Store the SSH process ID
+        SSH_PID=$!
+        
+        # Wait for port forwarding to be ready
+        sleep 10
+        
         echo "Checking frontend health..."
-        curl -f http://${{ secrets.AZURE_VM_HOST }}:3000 || {
+        curl -f http://localhost:3000 || {
           echo "Frontend health check failed!"
+          kill $SSH_PID
           exit 1
         }
         
         echo "Checking backend health..."
-        curl -f http://${{ secrets.AZURE_VM_HOST }}:8000 || {
+        curl -f http://localhost:8000 || {
           echo "Backend health check failed!"
+          kill $SSH_PID
           exit 1
         }
+        
+        # Clean up the SSH process
+        kill $SSH_PID
 
     - name: Cleanup
       if: always()
