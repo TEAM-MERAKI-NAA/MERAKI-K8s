@@ -96,6 +96,10 @@ jobs:
           kubectl get namespaces
           echo "Verifying secrets:"
           kubectl get secrets --all-namespaces | grep acr-secret
+          
+          # Verify secret contents (without showing sensitive data)
+          echo "Verifying secret configuration:"
+          kubectl get secret acr-secret -n frontend -o jsonpath="{.data.\.dockerconfigjson}" | base64 -d | jq -r ".auths.\"${{ secrets.ACR_LOGIN_SERVER }}\".username"
         '
 
     - name: Deploy Frontend
