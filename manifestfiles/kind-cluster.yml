@@ -3,9 +3,22 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
   extraPortMappings:
-  - containerPort: 30000
+  - containerPort: 3000
     hostPort: 3000
-  - containerPort: 30001
+  - containerPort: 8000
     hostPort: 8000
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraMounts:
+  - hostPath: /var/run/docker.sock
+    containerPath: /var/run/docker.sock
 - role: worker
+  labels:
+    node-role: worker
 - role: worker
+  labels:
+    node-role: worker
