@@ -171,6 +171,12 @@ jobs:
           
           echo "Services in all namespaces:"
           kubectl get services --all-namespaces
+          
+          echo "Verifying service ports..."
+          echo "Frontend service port:"
+          kubectl get service frontend-service -n frontend -o jsonpath="{.spec.ports[0].port}"
+          echo -e "\nBackend service port:"
+          kubectl get service backend-service -n backend -o jsonpath="{.spec.ports[0].port}"
         '
 
     - name: Health Check
@@ -179,7 +185,7 @@ jobs:
         sleep 60  # Increased wait time
         
         echo "Checking frontend health..."
-        curl -f http://${{ secrets.AZURE_VM_HOST }}:80 || {
+        curl -f http://${{ secrets.AZURE_VM_HOST }}:3000 || {
           echo "Frontend health check failed!"
           exit 1
         }
