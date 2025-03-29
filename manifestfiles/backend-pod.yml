@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backend-pod
+  namespace: backend
+  labels:
+    app: backend
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  imagePullSecrets:
+    - name: acr-secret
+  containers:
+    - name: backend
+      image: immihubacr.azurecr.io/immihub-be:latest
+      imagePullPolicy: Always
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+        limits:
+          cpu: "1000m"
+          memory: "1Gi"
+      env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: DJANGO_SETTINGS_MODULE
+          value: "meraki.settings"
+        - name: ALLOWED_HOSTS
+          value: "*"
+        - name: DEBUG
+          value: "True"  # Set to True temporarily for debugging
+      ports:
+        - containerPort: 8000
+          name: http
+      volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: app-data
+          mountPath: /app/data
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: http
+        initialDelaySeconds: 60  # Increased to allow more startup time
+        periodSeconds: 30
+        timeoutSeconds: 10  # Increased timeout
+        successThreshold: 1
+        failureThreshold: 5  # Increased failures allowed
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        initialDelaySeconds: 30  # Increased to allow more startup time
+        periodSeconds: 10
+        timeoutSeconds: 10
+        successThreshold: 1
+        failureThreshold: 3
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: false  # Changed to false
+        runAsNonRoot: true
+        runAsUser: 1000
+  volumes:
+    - name: tmp-volume
+      emptyDir: {}
+    - name: app-data
+      emptyDir: {} 
