@@ -44,30 +44,40 @@ spec:
             - name: ALLOWED_HOSTS
               value: "*"
             - name: DEBUG
-              value: "False"
+              value: "True"  # Set to True temporarily for debugging
           ports:
             - containerPort: 8000
               name: http
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: app-data
+              mountPath: /app/data
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60  # Increased to allow more startup time
             periodSeconds: 30
-            timeoutSeconds: 5
+            timeoutSeconds: 10  # Increased timeout
             successThreshold: 1
-            failureThreshold: 3
+            failureThreshold: 5  # Increased failures allowed
           readinessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
+            initialDelaySeconds: 30  # Increased to allow more startup time
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             successThreshold: 1
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: false  # Changed to false
             runAsNonRoot: true
             runAsUser: 1000
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+        - name: app-data
+          emptyDir: {}
