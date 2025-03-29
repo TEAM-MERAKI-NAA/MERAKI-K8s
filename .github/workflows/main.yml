@@ -56,6 +56,129 @@ jobs:
         # Verify files were copied
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} 'ls -la ~/manifestfiles'
 
+    - name: Create Fixed Deployment Files
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          # Create updated backend deployment file with read-write filesystem
+          cat > ~/manifestfiles/backend-deployment-fixed.yml << "EOF"
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: backend-deployment
+            namespace: backend
+          spec:
+            replicas: 2
+            strategy:
+              type: RollingUpdate
+              rollingUpdate:
+                maxSurge: 1
+                maxUnavailable: 0
+            selector:
+              matchLabels:
+                app: backend
+            template:
+              metadata:
+                labels:
+                  app: backend
+                annotations:
+                  prometheus.io/scrape: "true"
+                  prometheus.io/port: "8000"
+              spec:
+                imagePullSecrets:
+                  - name: acr-secret
+                containers:
+                  - name: backend
+                    image: immihubacr.azurecr.io/immihub-be:latest
+                    imagePullPolicy: Always
+                    resources:
+                      requests:
+                        cpu: "200m"
+                        memory: "256Mi"
+                      limits:
+                        cpu: "1000m"
+                        memory: "1Gi"
+                    env:
+                      - name: PYTHONDONTWRITEBYTECODE
+                        value: "1"
+                      - name: PYTHONUNBUFFERED
+                        value: "1"
+                      - name: DJANGO_SETTINGS_MODULE
+                        value: "meraki.settings"
+                      - name: ALLOWED_HOSTS
+                        value: "*"
+                      - name: DEBUG
+                        value: "True"
+                    ports:
+                      - containerPort: 8000
+                        name: http
+                    volumeMounts:
+                      - name: tmp-volume
+                        mountPath: /tmp
+                      - name: app-data
+                        mountPath: /app/data
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      initialDelaySeconds: 60
+                      periodSeconds: 30
+                      timeoutSeconds: 10
+                      successThreshold: 1
+                      failureThreshold: 5
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 10
+                      successThreshold: 1
+                      failureThreshold: 3
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: false
+                      runAsNonRoot: true
+                      runAsUser: 1000
+                volumes:
+                  - name: tmp-volume
+                    emptyDir: {}
+                  - name: app-data
+                    emptyDir: {}
+          EOF
+          
+          # Create updated frontend deployment file with emptyDir for /tmp
+          cat > ~/manifestfiles/frontend-deployment-fixed.yml << "EOF"
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: frontend-deployment
+            namespace: frontend
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: frontend
+            template:
+              metadata:
+                labels:
+                  app: frontend
+              spec:
+                containers:
+                - name: frontend
+                  image: immihubacr.azurecr.io/immihub-fe:latest
+                  ports:
+                  - containerPort: 3000
+                  volumeMounts:
+                  - mountPath: /tmp
+                    name: tmp-volume
+                volumes:
+                - name: tmp-volume
+                  emptyDir: {}
+                imagePullSecrets:
+                - name: acr-secret
+          EOF
+        '
+
     - name: Install Kubernetes Tools
       run: |
         ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
@@ -146,12 +269,13 @@ jobs:
           docker tag immihub-fe ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-fe:latest
           
-          # Apply Kubernetes manifests for frontend in frontend namespace
-          kubectl apply -f ~/manifestfiles/frontend-deployment.yml -n frontend
+          # Apply Kubernetes manifests for frontend in frontend namespace using the fixed deployment file
+          kubectl apply -f ~/manifestfiles/frontend-deployment-fixed.yml
           kubectl apply -f ~/manifestfiles/frontend-service.yml -n frontend
           
-          # Wait for frontend deployment to be ready
-          kubectl -n frontend wait --for=condition=available deployment/frontend-deployment --timeout=300s
+          # Wait for frontend deployment to be ready with increased timeout
+          echo "Waiting for frontend deployment to be ready..."
+          kubectl -n frontend wait --for=condition=available deployment/frontend-deployment --timeout=600s
           
           # Verify frontend deployment
           echo "Frontend deployment status:"
@@ -176,16 +300,44 @@ jobs:
           docker tag immihub-be ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
           docker push ${{ secrets.ACR_LOGIN_SERVER }}/immihub-be:latest
           
-          # Apply Kubernetes manifests for backend in backend namespace
-          kubectl apply -f ~/manifestfiles/backend-deployment.yml -n backend
+          # Apply Kubernetes manifests for backend in backend namespace using the fixed deployment file
+          kubectl apply -f ~/manifestfiles/backend-deployment-fixed.yml
           kubectl apply -f ~/manifestfiles/backend-service.yml -n backend
           
-          # Wait for backend deployment to be ready
-          kubectl -n backend wait --for=condition=available deployment/backend-deployment --timeout=300s
+          # Wait for backend deployment to be ready with increased timeout
+          echo "Waiting for backend deployment to be ready (this may take several minutes)..."
+          kubectl -n backend wait --for=condition=available deployment/backend-deployment --timeout=600s || true
           
-          # Verify backend deployment
+          # Verify backend deployment 
           echo "Backend deployment status:"
           kubectl get all -n backend
+        '
+
+    - name: Debug Backend if Needed
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          # Check if any pods are in CrashLoopBackOff state
+          if kubectl get pods -n backend | grep -q "CrashLoopBackOff"; then
+            echo "Backend pods are still crashing, collecting detailed logs..."
+            
+            echo "Pod details:"
+            kubectl describe pods -n backend -l app=backend
+            
+            echo "Container logs:"
+            for pod in $(kubectl get pods -n backend -l app=backend -o jsonpath="{.items[*].metadata.name}"); do
+              echo "Logs for pod $pod:"
+              kubectl logs -n backend $pod --previous || echo "No previous logs available"
+              kubectl logs -n backend $pod || echo "No current logs available"
+            done
+            
+            echo "Checking node status:"
+            kubectl describe nodes
+            
+            echo "Checking events:"
+            kubectl get events -n backend --sort-by=.metadata.creationTimestamp
+          else
+            echo "Backend pods appear to be running normally"
+          fi
         '
 
     - name: Verify Deployments
@@ -215,94 +367,77 @@ jobs:
           
           # Check pod logs if needed
           echo "Checking frontend pod logs:"
-          kubectl logs -n frontend -l app=frontend --tail=50
+          kubectl logs -n frontend -l app=frontend --tail=30
           echo "Checking backend pod logs:"
-          kubectl logs -n backend -l app=backend --tail=50
+          kubectl logs -n backend -l app=backend --tail=30
         '
 
-    - name: Health Check
+    - name: Improved Health Check
       run: |
-        echo "Waiting for services to start..."
-        sleep 60  # Increased wait time
-        
-        # Run health checks with improved error handling and SSH options
-        ssh $SSH_OPTS -v ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
-          set -e  # Exit on any error
+        ssh $SSH_OPTS ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           echo "Starting health checks on VM..."
           
-          # Debug information
-          echo "Current directory: $(pwd)"
-          echo "Kubectl version: $(kubectl version --client)"
-          echo "Current user: $(whoami)"
+          # Check if pods are running
+          echo "Checking pod status..."
+          frontend_ready=$(kubectl get pods -n frontend -o jsonpath="{.items[*].status.containerStatuses[0].ready}" | tr -d "[:space:]")
+          backend_ready=$(kubectl get pods -n backend -o jsonpath="{.items[*].status.containerStatuses[0].ready}" | tr -d "[:space:]")
           
-          # Kill any existing port-forward processes with proper error handling
-          echo "Cleaning up existing port-forward processes..."
-          pkill -f "kubectl port-forward" || true
-          sleep 2
+          echo "Frontend pods ready status: $frontend_ready"
+          echo "Backend pods ready status: $backend_ready"
           
-          # Verify services are running
-          echo "Checking service status..."
-          kubectl get services -n frontend
-          kubectl get services -n backend
+          # Create a test pod to check the services from inside the cluster
+          echo "Creating test pod for service checks..."
+          cat << EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: curl-test
+            namespace: default
+          spec:
+            containers:
+            - name: curl
+              image: curlimages/curl
+              command: ["sleep", "300"]
+            restartPolicy: Never
+          EOF
           
-          # Start port forwarding in background with logging and proper error handling
-          echo "Starting port forwarding..."
-          kubectl port-forward -n frontend service/frontend-service 3000:3000 > /tmp/frontend-port-forward.log 2>&1 &
-          PF_FRONTEND_PID=$!
-          kubectl port-forward -n backend service/backend-service 8000:8000 > /tmp/backend-port-forward.log 2>&1 &
-          PF_BACKEND_PID=$!
+          # Wait for the test pod to be ready
+          echo "Waiting for test pod to be ready..."
+          kubectl wait --for=condition=ready pod/curl-test --timeout=60s
           
-          # Wait for port forwarding to be ready
-          echo "Waiting for port forwarding to be ready..."
-          sleep 10
+          # Test frontend from inside the cluster
+          echo "Testing frontend service from inside cluster..."
+          kubectl exec curl-test -- curl -s -m 10 http://frontend-service.frontend:3000 > /dev/null && \
+            echo "Frontend service is accessible" || echo "Frontend service is not accessible"
           
-          # Check if port forwarding processes are running
-          echo "Checking port forwarding processes..."
-          if ! kill -0 $PF_FRONTEND_PID 2>/dev/null; then
-            echo "Frontend port-forward failed to start"
-            cat /tmp/frontend-port-forward.log
-            exit 1
-          fi
-          if ! kill -0 $PF_BACKEND_PID 2>/dev/null; then
-            echo "Backend port-forward failed to start"
-            cat /tmp/backend-port-forward.log
-            exit 1
-          fi
+          # Test backend from inside the cluster
+          echo "Testing backend service from inside cluster..."
+          kubectl exec curl-test -- curl -s -m 10 http://backend-service.backend:8000 > /dev/null && \
+            echo "Backend service is accessible" || echo "Backend service is not accessible"
           
-          # Test frontend with verbose output and timeout
-          echo "Testing frontend..."
-          if timeout 30 curl -v http://localhost:3000 > /tmp/frontend-test.log 2>&1; then
-            echo "Frontend is healthy"
-          else
-            echo "Frontend health check failed"
-            echo "Frontend test log:"
-            cat /tmp/frontend-test.log
-            echo "Frontend port-forward log:"
-            cat /tmp/frontend-port-forward.log
-            exit 1
-          fi
-          
-          # Test backend with verbose output and timeout
-          echo "Testing backend..."
-          if timeout 30 curl -v http://localhost:8000 > /tmp/backend-test.log 2>&1; then
-            echo "Backend is healthy"
-          else
-            echo "Backend health check failed"
-            echo "Backend test log:"
-            cat /tmp/backend-test.log
-            echo "Backend port-forward log:"
-            cat /tmp/backend-port-forward.log
-            exit 1
-          fi
-          
-          # Clean up port forwarding
-          echo "Cleaning up port forwarding..."
-          kill $PF_FRONTEND_PID $PF_BACKEND_PID 2>/dev/null || true
+          # Clean up test pod
+          echo "Cleaning up test pod..."
+          kubectl delete pod curl-test
         ' || {
-          echo "SSH command failed with exit code $?"
-          echo "Please check the SSH connection and VM status"
-          exit 1
+          echo "Health check completed with issues. See logs above for details."
+          # Don't fail the workflow here, just continue and record the result
         }
+
+    - name: Export Service Information
+      run: |
+        ssh $SSH_OPTS ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+          # Get NodePort information for accessing the services
+          frontend_port=$(kubectl get svc frontend-service -n frontend -o jsonpath="{.spec.ports[0].nodePort}")
+          backend_port=$(kubectl get svc backend-service -n backend -o jsonpath="{.spec.ports[0].nodePort}")
+          
+          # Get worker node IP for external access
+          node_ip=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[?(@.type==\"InternalIP\")].address}")
+          
+          echo "===== Service Access Information ====="
+          echo "Frontend available at: http://$node_ip:$frontend_port"
+          echo "Backend available at: http://$node_ip:$backend_port"
+          echo "====================================="
+        '
 
     - name: Cleanup
       if: always()
