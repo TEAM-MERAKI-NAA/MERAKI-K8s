@@ -11,6 +11,7 @@ env:
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
   ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
   ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+  SSH_OPTS: "-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3"
 
 jobs:
   deploy:
@@ -24,7 +25,25 @@ jobs:
         mkdir -p ~/.ssh
         echo "${{ secrets.AZURE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
+        chmod 700 ~/.ssh
         echo "${{ secrets.AZURE_VM_HOST }} $(ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} 2>/dev/null || echo '')" >> ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
+        
+        # Test SSH connection with retries
+        for i in {1..3}; do
+          echo "SSH connection attempt $i..."
+          if ssh -v $SSH_OPTS ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} 'echo "SSH connection successful"'; then
+            echo "SSH connection established successfully"
+            break
+          else
+            echo "SSH connection attempt $i failed"
+            if [ $i -eq 3 ]; then
+              echo "All SSH connection attempts failed"
+              exit 1
+            fi
+            sleep 5
+          fi
+        done
 
     - name: Copy Manifest Files
       run: |
@@ -206,8 +225,8 @@ jobs:
         echo "Waiting for services to start..."
         sleep 60  # Increased wait time
         
-        # Run health checks directly on the VM with better error handling
-        ssh -o StrictHostKeyChecking=no -v ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
+        # Run health checks with improved error handling and SSH options
+        ssh $SSH_OPTS -v ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} '
           set -e  # Exit on any error
           echo "Starting health checks on VM..."
           
@@ -216,19 +235,22 @@ jobs:
           echo "Kubectl version: $(kubectl version --client)"
           echo "Current user: $(whoami)"
           
-          # Kill any existing port-forward processes
+          # Kill any existing port-forward processes with proper error handling
           echo "Cleaning up existing port-forward processes..."
           pkill -f "kubectl port-forward" || true
+          sleep 2
           
           # Verify services are running
           echo "Checking service status..."
           kubectl get services -n frontend
           kubectl get services -n backend
           
-          # Start port forwarding in background with logging
+          # Start port forwarding in background with logging and proper error handling
           echo "Starting port forwarding..."
           kubectl port-forward -n frontend service/frontend-service 3000:3000 > /tmp/frontend-port-forward.log 2>&1 &
+          PF_FRONTEND_PID=$!
           kubectl port-forward -n backend service/backend-service 8000:8000 > /tmp/backend-port-forward.log 2>&1 &
+          PF_BACKEND_PID=$!
           
           # Wait for port forwarding to be ready
           echo "Waiting for port forwarding to be ready..."
@@ -236,11 +258,20 @@ jobs:
           
           # Check if port forwarding processes are running
           echo "Checking port forwarding processes..."
-          ps aux | grep "kubectl port-forward"
+          if ! kill -0 $PF_FRONTEND_PID 2>/dev/null; then
+            echo "Frontend port-forward failed to start"
+            cat /tmp/frontend-port-forward.log
+            exit 1
+          fi
+          if ! kill -0 $PF_BACKEND_PID 2>/dev/null; then
+            echo "Backend port-forward failed to start"
+            cat /tmp/backend-port-forward.log
+            exit 1
+          fi
           
-          # Test frontend with verbose output
+          # Test frontend with verbose output and timeout
           echo "Testing frontend..."
-          if curl -v http://localhost:3000 > /tmp/frontend-test.log 2>&1; then
+          if timeout 30 curl -v http://localhost:3000 > /tmp/frontend-test.log 2>&1; then
             echo "Frontend is healthy"
           else
             echo "Frontend health check failed"
@@ -251,9 +282,9 @@ jobs:
             exit 1
           fi
           
-          # Test backend with verbose output
+          # Test backend with verbose output and timeout
           echo "Testing backend..."
-          if curl -v http://localhost:8000 > /tmp/backend-test.log 2>&1; then
+          if timeout 30 curl -v http://localhost:8000 > /tmp/backend-test.log 2>&1; then
             echo "Backend is healthy"
           else
             echo "Backend health check failed"
@@ -266,7 +297,7 @@ jobs:
           
           # Clean up port forwarding
           echo "Cleaning up port forwarding..."
-          pkill -f "kubectl port-forward" || true
+          kill $PF_FRONTEND_PID $PF_BACKEND_PID 2>/dev/null || true
         ' || {
           echo "SSH command failed with exit code $?"
           echo "Please check the SSH connection and VM status"
